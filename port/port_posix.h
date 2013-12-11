@@ -90,6 +90,7 @@ class Mutex {
   void Lock();
   void Unlock();
   void AssertHeld() { }
+  pthread_mutex_t getNative();
 
  private:
   friend class CondVar;
