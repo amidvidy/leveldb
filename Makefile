@@ -6,8 +6,8 @@
 # Uncomment exactly one of the lines labelled (A), (B), and (C) below
 # to switch between compilation modes.
 
-# OPT ?= -O2 -DNDEBUG -std=c++11      # (A) Production use (optimized mode)
-  OPT ?= -g2 -std=c++11             # (B) Debug mode, w/ full line-level debugging symbols
+ OPT ?= -O2 -DNDEBUG -std=c++11      # (A) Production use (optimized mode)
+# OPT ?= -g2 -std=c++11             # (B) Debug mode, w/ full line-level debugging symbols
 # OPT ?= -O2 -g2 -DNDEBUG  -std=c++11# (C) Profiling mode: opt, but w/debugging symbols
 #-----------------------------------------------
 
