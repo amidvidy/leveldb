@@ -84,7 +84,7 @@ class DBImpl : public DB {
   // Recover the descriptor from persistent storage.  May do a significant
   // amount of work to recover recently logged updates.  Any changes to
   // be made to the descriptor are added to *edit.
-  Status Recover(VersionEdit* edit) EXCLUSIVE_LOCKS_REQUIRED(mutex_);
+  Status Recover(VersionEdit* edit, xsync::XScope<pthread_mutex_t> &scope) EXCLUSIVE_LOCKS_REQUIRED(mutex_);
 
   void MaybeIgnoreError(Status* s) const;
 
@@ -93,33 +93,34 @@ class DBImpl : public DB {
 
   // Compact the in-memory write buffer to disk.  Switches to a new
   // log-file/memtable and writes a new descriptor iff successful.
-  Status CompactMemTable()
+  Status CompactMemTable(xsync::XScope<pthread_mutex_t> &scope)
       EXCLUSIVE_LOCKS_REQUIRED(mutex_);
 
   Status RecoverLogFile(uint64_t log_number,
                         VersionEdit* edit,
-                        SequenceNumber* max_sequence)
+                        SequenceNumber* max_sequence,
+                        xsync::XScope<pthread_mutex_t> &scope)
       EXCLUSIVE_LOCKS_REQUIRED(mutex_);
 
-  Status WriteLevel0Table(MemTable* mem, VersionEdit* edit, Version* base)
+  Status WriteLevel0Table(MemTable* mem, VersionEdit* edit, Version* base, xsync::XScope<pthread_mutex_t> &scope)
       EXCLUSIVE_LOCKS_REQUIRED(mutex_);
 
-  Status MakeRoomForWrite(bool force /* compact even if there is room? */)
+  Status MakeRoomForWrite(bool force, xsync::XScope<pthread_mutex_t> &scope /* compact even if there is room? */)
       EXCLUSIVE_LOCKS_REQUIRED(mutex_);
   WriteBatch* BuildBatchGroup(Writer** last_writer);
 
-  void MaybeScheduleCompaction() EXCLUSIVE_LOCKS_REQUIRED(mutex_);
+  void MaybeScheduleCompaction(xsync::XScope<pthread_mutex_t> &scope) EXCLUSIVE_LOCKS_REQUIRED(mutex_);
   static void BGWork(void* db);
   void BackgroundCall();
-  Status BackgroundCompaction() EXCLUSIVE_LOCKS_REQUIRED(mutex_);
-  void CleanupCompaction(CompactionState* compact)
+  Status BackgroundCompaction(xsync::XScope<pthread_mutex_t> &scope) EXCLUSIVE_LOCKS_REQUIRED(mutex_);
+  void CleanupCompaction(CompactionState* compact, xsync::XScope<pthread_mutex_t> &scope)
       EXCLUSIVE_LOCKS_REQUIRED(mutex_);
-  Status DoCompactionWork(CompactionState* compact)
+  Status DoCompactionWork(CompactionState* compact, xsync::XScope<pthread_mutex_t> &scope)
       EXCLUSIVE_LOCKS_REQUIRED(mutex_);
 
   Status OpenCompactionOutputFile(CompactionState* compact);
   Status FinishCompactionOutputFile(CompactionState* compact, Iterator* input);
-  Status InstallCompactionResults(CompactionState* compact)
+  Status InstallCompactionResults(CompactionState* compact, xsync::XScope<pthread_mutex_t> &scope);
       EXCLUSIVE_LOCKS_REQUIRED(mutex_);
 
   // Constant after construction
@@ -138,7 +139,8 @@ class DBImpl : public DB {
   FileLock* db_lock_;
 
   port::Mutex suspend_mutex;
-  port::CondVar suspend_cv;
+  //port::CondVar suspend_cv;
+  xsync::XCondVar<pthread_mutex_t> suspend_xcv;
   int suspend_count;
   bool suspended;
   static void SuspendWork(void* db);
@@ -147,7 +149,8 @@ class DBImpl : public DB {
   // State below is protected by mutex_
   port::Mutex mutex_;
   port::AtomicPointer shutting_down_;
-  port::CondVar bg_cv_;          // Signalled when background work finishes
+  //port::CondVar bg_cv_;          // Signalled when background work finishes
+  xsync::XCondVar<pthread_mutex_t> bg_xcv_;
   MemTable* mem_;
   MemTable* imm_;                // Memtable being compacted
   port::AtomicPointer has_imm_;  // So bg thread can detect non-NULL imm_

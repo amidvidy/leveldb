@@ -126,10 +126,10 @@ DBImpl::DBImpl(const Options& raw_options, const std::string& dbname)
       dbname_(dbname),
       db_lock_(NULL),
       shutting_down_(NULL),
-      suspend_cv(&suspend_mutex),
+      //suspend_cv(&suspend_mutex),
       suspend_count(0),
       suspended(false),
-      bg_cv_(&mutex_),
+      //bg_cv_(&mutex_),
       mem_(new MemTable(internal_comparator_)),
       imm_(NULL),
       logfile_(NULL),
@@ -153,12 +153,16 @@ DBImpl::DBImpl(const Options& raw_options, const std::string& dbname)
 
 DBImpl::~DBImpl() {
   // Wait for background work to finish
-  mutex_.Lock();
-  shutting_down_.Release_Store(this);  // Any non-NULL value is ok
-  while (bg_compaction_scheduled_) {
-    bg_cv_.Wait();
-  }
-  mutex_.Unlock();
+  //mutex_.Lock();
+   {
+     xsync::XScope<pthread_mutex_t> scope(mutex_.getNative());
+     shutting_down_.Release_Store(this);  // Any non-NULL value is ok
+     while (bg_compaction_scheduled_) {
+       //bg_cv_.Wait();
+        bg_xcv_.wait(scope);
+     }
+    }
+  //mutex_.Unlock();
 
   if (db_lock_ != NULL) {
     env_->UnlockFile(db_lock_);
@@ -271,8 +275,8 @@ void DBImpl::DeleteObsoleteFiles() {
   }
 }
 
-Status DBImpl::Recover(VersionEdit* edit) {
-  mutex_.AssertHeld();
+Status DBImpl::Recover(VersionEdit* edit, xsync::XScope<pthread_mutex_t> &scope) {
+  //mutex_.AssertHeld();
 
   // Ignore error from CreateDir since the creation of the DB is
   // committed only when the descriptor is created, and this directory
@@ -341,7 +345,7 @@ Status DBImpl::Recover(VersionEdit* edit) {
     // Recover in the order in which the logs were generated
     std::sort(logs.begin(), logs.end());
     for (size_t i = 0; i < logs.size(); i++) {
-      s = RecoverLogFile(logs[i], edit, &max_sequence);
+      s = RecoverLogFile(logs[i], edit, &max_sequence, scope);
 
       // The previous incarnation may not have written any MANIFEST
       // records after allocating this log number.  So we manually
@@ -361,7 +365,8 @@ Status DBImpl::Recover(VersionEdit* edit) {
 
 Status DBImpl::RecoverLogFile(uint64_t log_number,
                               VersionEdit* edit,
-                              SequenceNumber* max_sequence) {
+                              SequenceNumber* max_sequence,
+                              xsync::XScope<pthread_mutex_t> &scope) {
   struct LogReporter : public log::Reader::Reporter {
     Env* env;
     Logger* info_log;
@@ -375,7 +380,7 @@ Status DBImpl::RecoverLogFile(uint64_t log_number,
     }
   };
 
-  mutex_.AssertHeld();
+  //mutex_.AssertHeld();
 
   // Open the log file
   std::string fname = LogFileName(dbname_, log_number);
@@ -432,7 +437,7 @@ Status DBImpl::RecoverLogFile(uint64_t log_number,
     }
 
     if (mem->ApproximateMemoryUsage() > options_.write_buffer_size) {
-      status = WriteLevel0Table(mem, edit, NULL);
+      status = WriteLevel0Table(mem, edit, NULL, scope);
       if (!status.ok()) {
         // Reflect errors immediately so that conditions like full
         // file-systems cause the DB::Open() to fail.
@@ -444,7 +449,7 @@ Status DBImpl::RecoverLogFile(uint64_t log_number,
   }
 
   if (status.ok() && mem != NULL) {
-    status = WriteLevel0Table(mem, edit, NULL);
+    status = WriteLevel0Table(mem, edit, NULL, scope);
     // Reflect errors immediately so that conditions like full
     // file-systems cause the DB::Open() to fail.
   }
@@ -455,8 +460,8 @@ Status DBImpl::RecoverLogFile(uint64_t log_number,
 }
 
 Status DBImpl::WriteLevel0Table(MemTable* mem, VersionEdit* edit,
-                                Version* base) {
-  mutex_.AssertHeld();
+                                Version* base, xsync::XScope<pthread_mutex_t> &scope) {
+  //mutex_.AssertHeld();
   const uint64_t start_micros = env_->NowMicros();
   FileMetaData meta;
   meta.number = versions_->NewFileNumber();
@@ -467,9 +472,11 @@ Status DBImpl::WriteLevel0Table(MemTable* mem, VersionEdit* edit,
 
   Status s;
   {
-    mutex_.Unlock();
+    //mutex_.Unlock();
+    scope.exit();
     s = BuildTable(dbname_, env_, options_, table_cache_, iter, &meta);
-    mutex_.Lock();
+    scope.enter();
+    //mutex_.Lock();
   }
 
   Log(options_.info_log, "Level-0 table #%llu: %lld bytes %s",
@@ -500,15 +507,15 @@ Status DBImpl::WriteLevel0Table(MemTable* mem, VersionEdit* edit,
   return s;
 }
 
-Status DBImpl::CompactMemTable() {
-  mutex_.AssertHeld();
+  Status DBImpl::CompactMemTable(xsync::XScope<pthread_mutex_t> &scope) {
+   //mutex_.AssertHeld();
   assert(imm_ != NULL);
 
   // Save the contents of the memtable as a new Table
   VersionEdit edit;
   Version* base = versions_->current();
   base->Ref();
-  Status s = WriteLevel0Table(imm_, &edit, base);
+  Status s = WriteLevel0Table(imm_, &edit, base, scope);
   base->Unref();
 
   if (s.ok() && shutting_down_.Acquire_Load()) {
@@ -536,7 +543,8 @@ Status DBImpl::CompactMemTable() {
 void DBImpl::CompactRange(const Slice* begin, const Slice* end) {
   int max_level_with_files = 1;
   {
-    MutexLock l(&mutex_);
+    //MutexLock l(&mutex_);
+    xsync::XScope<pthread_mutex_t> scope(mutex_.getNative());
     Version* base = versions_->current();
     for (int level = 1; level < config::kNumLevels; level++) {
       if (base->OverlapInLevel(level, begin, end)) {
@@ -572,15 +580,18 @@ void DBImpl::TEST_CompactRange(int level, const Slice* begin,const Slice* end) {
     manual.end = &end_storage;
   }
 
-  MutexLock l(&mutex_);
+  //MutexLock l(&mutex_);
+  xsync::XScope<pthread_mutex_t> scope(mutex_.getNative());
   while (!manual.done) {
     while (manual_compaction_ != NULL) {
-      bg_cv_.Wait();
+      //bg_cv_.Wait();
+      bg_xcv_.wait(scope);
     }
     manual_compaction_ = &manual;
-    MaybeScheduleCompaction();
+    MaybeScheduleCompaction(scope);
     while (manual_compaction_ == &manual) {
-      bg_cv_.Wait();
+      //bg_cv_.Wait();
+      bg_xcv_.wait(scope);
     }
   }
 }
@@ -590,9 +601,11 @@ Status DBImpl::TEST_CompactMemTable() {
   Status s = Write(WriteOptions(), NULL);
   if (s.ok()) {
     // Wait until the compaction completes
-    MutexLock l(&mutex_);
+    //MutexLock l(&mutex_);
+    xsync::XScope<pthread_mutex_t> scope(mutex_.getNative());
     while (imm_ != NULL && bg_error_.ok()) {
-      bg_cv_.Wait();
+      //bg_cv_.Wait();
+      bg_xcv_.wait(scope);
     }
     if (imm_ != NULL) {
       s = bg_error_;
@@ -601,8 +614,8 @@ Status DBImpl::TEST_CompactMemTable() {
   return s;
 }
 
-void DBImpl::MaybeScheduleCompaction() {
-  mutex_.AssertHeld();
+void DBImpl::MaybeScheduleCompaction(xsync::XScope<pthread_mutex_t> &scope) {
+  //mutex_.AssertHeld();
   if (bg_compaction_scheduled_) {
     // Already scheduled
   } else if (shutting_down_.Acquire_Load()) {
@@ -622,10 +635,11 @@ void DBImpl::BGWork(void* db) {
 }
 
 void DBImpl::BackgroundCall() {
-  MutexLock l(&mutex_);
+  //MutexLock l(&mutex_);
+  xsync::XScope<pthread_mutex_t> scope(mutex_.getNative());
   assert(bg_compaction_scheduled_);
   if (!shutting_down_.Acquire_Load()) {
-    Status s = BackgroundCompaction();
+    Status s = BackgroundCompaction(scope);
     if (s.ok()) {
       // Success
       consecutive_compaction_errors_ = 0;
@@ -636,17 +650,20 @@ void DBImpl::BackgroundCall() {
       // case this is an environmental problem and we do not want to
       // chew up resources for failed compactions for the duration of
       // the problem.
-      bg_cv_.SignalAll();  // In case a waiter can proceed despite the error
+      //bg_cv_.SignalAll();  // In case a waiter can proceed despite the error
+      bg_xcv_.broadcast(scope);
       Log(options_.info_log, "Waiting after background compaction error: %s",
           s.ToString().c_str());
-      mutex_.Unlock();
+      //mutex_.Unlock();
+      scope.exit();
       ++consecutive_compaction_errors_;
       int seconds_to_sleep = 1;
       for (int i = 0; i < 3 && i < consecutive_compaction_errors_ - 1; ++i) {
         seconds_to_sleep *= 2;
       }
       env_->SleepForMicroseconds(seconds_to_sleep * 1000000);
-      mutex_.Lock();
+      //mutex_.Lock();
+      scope.enter();
     }
   }
 
@@ -654,15 +671,16 @@ void DBImpl::BackgroundCall() {
 
   // Previous compaction may have produced too many files in a level,
   // so reschedule another compaction if needed.
-  MaybeScheduleCompaction();
-  bg_cv_.SignalAll();
+  MaybeScheduleCompaction(scope);
+  //bg_cv_.SignalAll();
+  bg_xcv_.broadcast(scope);
 }
 
-Status DBImpl::BackgroundCompaction() {
-  mutex_.AssertHeld();
+Status DBImpl::BackgroundCompaction(xsync::XScope<pthread_mutex_t> &scope) {
+   //mutex_.AssertHeld();
 
   if (imm_ != NULL) {
-    return CompactMemTable();
+    return CompactMemTable(scope);
   }
 
   Compaction* c;
@@ -705,8 +723,8 @@ Status DBImpl::BackgroundCompaction() {
         versions_->LevelSummary(&tmp));
   } else {
     CompactionState* compact = new CompactionState(c);
-    status = DoCompactionWork(compact);
-    CleanupCompaction(compact);
+    status = DoCompactionWork(compact, scope);
+    CleanupCompaction(compact, scope);
     c->ReleaseInputs();
     DeleteObsoleteFiles();
   }
@@ -740,8 +758,8 @@ Status DBImpl::BackgroundCompaction() {
   return status;
 }
 
-void DBImpl::CleanupCompaction(CompactionState* compact) {
-  mutex_.AssertHeld();
+  void DBImpl::CleanupCompaction(CompactionState* compact, xsync::XScope<pthread_mutex_t> &scope) {
+  //mutex_.AssertHeld();
   if (compact->builder != NULL) {
     // May happen if we get a shutdown call in the middle of compaction
     compact->builder->Abandon();
@@ -762,7 +780,8 @@ Status DBImpl::OpenCompactionOutputFile(CompactionState* compact) {
   assert(compact->builder == NULL);
   uint64_t file_number;
   {
-    mutex_.Lock();
+    xsync::XScope<pthread_mutex_t> scope(mutex_.getNative());
+    //mutex_.Lock();
     file_number = versions_->NewFileNumber();
     pending_outputs_.insert(file_number);
     CompactionState::Output out;
@@ -770,7 +789,7 @@ Status DBImpl::OpenCompactionOutputFile(CompactionState* compact) {
     out.smallest.Clear();
     out.largest.Clear();
     compact->outputs.push_back(out);
-    mutex_.Unlock();
+    //mutex_.Unlock();
   }
 
   // Make the output file
@@ -834,8 +853,8 @@ Status DBImpl::FinishCompactionOutputFile(CompactionState* compact,
 }
 
 
-Status DBImpl::InstallCompactionResults(CompactionState* compact) {
-  mutex_.AssertHeld();
+Status DBImpl::InstallCompactionResults(CompactionState* compact, xsync::XScope<pthread_mutex_t> &scope) {
+  //mutex_.AssertHeld();
   Log(options_.info_log,  "Compacted %d@%d + %d@%d files => %lld bytes",
       compact->compaction->num_input_files(0),
       compact->compaction->level(),
@@ -855,7 +874,7 @@ Status DBImpl::InstallCompactionResults(CompactionState* compact) {
   return versions_->LogAndApply(compact->compaction->edit(), &mutex_);
 }
 
-Status DBImpl::DoCompactionWork(CompactionState* compact) {
+Status DBImpl::DoCompactionWork(CompactionState* compact, xsync::XScope<pthread_mutex_t> &scope) {
   const uint64_t start_micros = env_->NowMicros();
   int64_t imm_micros = 0;  // Micros spent doing imm_ compactions
 
@@ -875,7 +894,8 @@ Status DBImpl::DoCompactionWork(CompactionState* compact) {
   }
 
   // Release mutex while we're actually doing the compaction work
-  mutex_.Unlock();
+  //mutex_.Unlock();
+  scope.exit();
 
   Iterator* input = versions_->MakeInputIterator(compact->compaction);
   input->SeekToFirst();
@@ -888,12 +908,15 @@ Status DBImpl::DoCompactionWork(CompactionState* compact) {
     // Prioritize immutable compaction work
     if (has_imm_.NoBarrier_Load() != NULL) {
       const uint64_t imm_start = env_->NowMicros();
-      mutex_.Lock();
+      //mutex_.Lock();
+      scope.enter();
       if (imm_ != NULL) {
-        CompactMemTable();
-        bg_cv_.SignalAll();  // Wakeup MakeRoomForWrite() if necessary
+        CompactMemTable(scope);
+        bg_xcv_.broadcast(scope);
+        //bg_cv_.SignalAll();  // Wakeup MakeRoomForWrite() if necessary
       }
-      mutex_.Unlock();
+      //mutex_.Unlock();
+      scope.exit();
       imm_micros += (env_->NowMicros() - imm_start);
     }
 
@@ -1001,11 +1024,12 @@ Status DBImpl::DoCompactionWork(CompactionState* compact) {
     stats.bytes_written += compact->outputs[i].file_size;
   }
 
-  mutex_.Lock();
+  //mutex_.Lock();
+  scope.enter();
   stats_[compact->compaction->level() + 1].Add(stats);
 
   if (status.ok()) {
-    status = InstallCompactionResults(compact);
+    status = InstallCompactionResults(compact, scope);
   }
   VersionSet::LevelSummaryStorage tmp;
   Log(options_.info_log,
@@ -1023,11 +1047,14 @@ struct IterState {
 
 static void CleanupIteratorState(void* arg1, void* arg2) {
   IterState* state = reinterpret_cast<IterState*>(arg1);
-  state->mu->Lock();
-  state->mem->Unref();
-  if (state->imm != NULL) state->imm->Unref();
-  state->version->Unref();
-  state->mu->Unlock();
+  {
+    xsync::XScope<pthread_mutex_t> scope(state->mu->getNative());
+    //state->mu->Lock();
+    state->mem->Unref();
+    if (state->imm != NULL) state->imm->Unref();
+    state->version->Unref();
+    //state->mu->Unlock();
+  }
   delete state;
 }
 }  // namespace
@@ -1036,30 +1063,34 @@ Iterator* DBImpl::NewInternalIterator(const ReadOptions& options,
                                       SequenceNumber* latest_snapshot,
                                       uint32_t* seed) {
   IterState* cleanup = new IterState;
-  mutex_.Lock();
-  *latest_snapshot = versions_->LastSequence();
+  Iterator* internal_iter;
+  {
+    xsync::XScope<pthread_mutex_t> scope(mutex_.getNative());
+    //mutex_.Lock();
+    *latest_snapshot = versions_->LastSequence();
 
-  // Collect together all needed child iterators
-  std::vector<Iterator*> list;
-  list.push_back(mem_->NewIterator());
-  mem_->Ref();
-  if (imm_ != NULL) {
-    list.push_back(imm_->NewIterator());
-    imm_->Ref();
+    // Collect together all needed child iterators
+    std::vector<Iterator*> list;
+    list.push_back(mem_->NewIterator());
+    mem_->Ref();
+    if (imm_ != NULL) {
+      list.push_back(imm_->NewIterator());
+      imm_->Ref();
+    }
+    versions_->current()->AddIterators(options, &list);
+
+    internal_iter = NewMergingIterator(&internal_comparator_, &list[0], list.size());
+    versions_->current()->Ref();
+
+    cleanup->mu = &mutex_;
+    cleanup->mem = mem_;
+    cleanup->imm = imm_;
+    cleanup->version = versions_->current();
+    internal_iter->RegisterCleanup(CleanupIteratorState, cleanup, NULL);
+
+    *seed = ++seed_;
+    //mutex_.Unlock();
   }
-  versions_->current()->AddIterators(options, &list);
-  Iterator* internal_iter =
-      NewMergingIterator(&internal_comparator_, &list[0], list.size());
-  versions_->current()->Ref();
-
-  cleanup->mu = &mutex_;
-  cleanup->mem = mem_;
-  cleanup->imm = imm_;
-  cleanup->version = versions_->current();
-  internal_iter->RegisterCleanup(CleanupIteratorState, cleanup, NULL);
-
-  *seed = ++seed_;
-  mutex_.Unlock();
   return internal_iter;
 }
 
@@ -1070,7 +1101,8 @@ Iterator* DBImpl::TEST_NewInternalIterator() {
 }
 
 int64_t DBImpl::TEST_MaxNextLevelOverlappingBytes() {
-  MutexLock l(&mutex_);
+  //MutexLock l(&mutex_);
+  xsync::XScope<pthread_mutex_t> scope(mutex_.getNative());
   return versions_->MaxNextLevelOverlappingBytes();
 }
 
@@ -1078,7 +1110,8 @@ Status DBImpl::Get(const ReadOptions& options,
                    const Slice& key,
                    std::string* value) {
   Status s;
-  MutexLock l(&mutex_);
+  //MutexLock l(&mutex_);
+  xsync::XScope<pthread_mutex_t> scope(mutex_.getNative());
   SequenceNumber snapshot;
   if (options.snapshot != NULL) {
     snapshot = reinterpret_cast<const SnapshotImpl*>(options.snapshot)->number_;
@@ -1098,7 +1131,8 @@ Status DBImpl::Get(const ReadOptions& options,
 
   // Unlock while reading from files and memtables
   {
-    mutex_.Unlock();
+    // mutex_.Unlock();
+    scope.exit();
     // First look in the memtable, then in the immutable memtable (if any).
     LookupKey lkey(key, snapshot);
     if (mem->Get(lkey, value, &s)) {
@@ -1109,11 +1143,12 @@ Status DBImpl::Get(const ReadOptions& options,
       s = current->Get(options, lkey, value, &stats);
       have_stat_update = true;
     }
-    mutex_.Lock();
+    //mutex_.Lock();
+    scope.enter();
   }
 
   if (have_stat_update && current->UpdateStats(stats)) {
-    MaybeScheduleCompaction();
+    MaybeScheduleCompaction(scope);
   }
   mem->Unref();
   if (imm != NULL) imm->Unref();
@@ -1134,19 +1169,22 @@ Iterator* DBImpl::NewIterator(const ReadOptions& options) {
 }
 
 void DBImpl::RecordReadSample(Slice key) {
-  MutexLock l(&mutex_);
+  //MutexLock l(&mutex_);
+  xsync::XScope<pthread_mutex_t> scope(mutex_.getNative());
   if (versions_->current()->RecordReadSample(key)) {
-    MaybeScheduleCompaction();
+    MaybeScheduleCompaction(scope);
   }
 }
 
 const Snapshot* DBImpl::GetSnapshot() {
-  MutexLock l(&mutex_);
+  //MutexLock l(&mutex_);
+  xsync::XScope<pthread_mutex_t> scope(mutex_.getNative());
   return snapshots_.New(versions_->LastSequence());
 }
 
 void DBImpl::ReleaseSnapshot(const Snapshot* s) {
-  MutexLock l(&mutex_);
+  //MutexLock l(&mutex_);
+  xsync::XScope<pthread_mutex_t> scope(mutex_.getNative());
   snapshots_.Delete(reinterpret_cast<const SnapshotImpl*>(s));
 }
 
@@ -1177,7 +1215,7 @@ Status DBImpl::Write(const WriteOptions& options, WriteBatch* my_batch) {
   }
 
   // May temporarily unlock and wait.
-  Status status = MakeRoomForWrite(my_batch == NULL);
+  Status status = MakeRoomForWrite(my_batch == NULL, scope);
   uint64_t last_sequence = versions_->LastSequence();
   Writer* last_writer = &w;
   if (status.ok() && my_batch != NULL) {  // NULL batch is for compactions
@@ -1279,8 +1317,8 @@ WriteBatch* DBImpl::BuildBatchGroup(Writer** last_writer) {
 
 // REQUIRES: mutex_ is held
 // REQUIRES: this thread is currently at the front of the writer queue
-Status DBImpl::MakeRoomForWrite(bool force) {
-  mutex_.AssertHeld();
+    Status DBImpl::MakeRoomForWrite(bool force, xsync::XScope<pthread_mutex_t> &scope) {
+  //mutex_.AssertHeld();
   assert(!writers_.empty());
   bool allow_delay = !force;
   Status s;
@@ -1298,10 +1336,12 @@ Status DBImpl::MakeRoomForWrite(bool force) {
       // individual write by 1ms to reduce latency variance.  Also,
       // this delay hands over some CPU to the compaction thread in
       // case it is sharing the same core as the writer.
-      mutex_.Unlock();
+      //mutex_.Unlock();
+      scope.exit();
       env_->SleepForMicroseconds(1000);
       allow_delay = false;  // Do not delay a single write more than once
-      mutex_.Lock();
+      //mutex_.Lock();
+      scope.enter();
     } else if (!force &&
                (mem_->ApproximateMemoryUsage() <= options_.write_buffer_size)) {
       // There is room in current memtable
@@ -1310,11 +1350,13 @@ Status DBImpl::MakeRoomForWrite(bool force) {
       // We have filled up the current memtable, but the previous
       // one is still being compacted, so we wait.
       Log(options_.info_log, "Current memtable full; waiting...\n");
-      bg_cv_.Wait();
+      //bg_cv_.Wait();
+      bg_xcv_.wait(scope);
     } else if (versions_->NumLevelFiles(0) >= config::kL0_StopWritesTrigger) {
       // There are too many level-0 files.
       Log(options_.info_log, "Too many L0 files; waiting...\n");
-      bg_cv_.Wait();
+      //bg_cv_.Wait();
+      bg_xcv_.wait(scope);
     } else {
       // Attempt to switch to a new memtable and trigger compaction of old
       assert(versions_->PrevLogNumber() == 0);
@@ -1336,7 +1378,7 @@ Status DBImpl::MakeRoomForWrite(bool force) {
       mem_ = new MemTable(internal_comparator_);
       mem_->Ref();
       force = false;   // Do not force another compaction if have room
-      MaybeScheduleCompaction();
+      MaybeScheduleCompaction(scope);
     }
   }
   return s;
@@ -1345,7 +1387,8 @@ Status DBImpl::MakeRoomForWrite(bool force) {
 bool DBImpl::GetProperty(const Slice& property, std::string* value) {
   value->clear();
 
-  MutexLock l(&mutex_);
+  //MutexLock l(&mutex_);
+  xsync::XScope<pthread_mutex_t> scope(mutex_.getNative());
   Slice in = property;
   Slice prefix("leveldb.");
   if (!in.starts_with(prefix)) return false;
@@ -1402,7 +1445,8 @@ void DBImpl::GetApproximateSizes(
   // TODO(opt): better implementation
   Version* v;
   {
-    MutexLock l(&mutex_);
+    //MutexLock l(&mutex_);
+    xsync::XScope<pthread_mutex_t> scope(mutex_.getNative());
     versions_->current()->Ref();
     v = versions_->current();
   }
@@ -1417,40 +1461,50 @@ void DBImpl::GetApproximateSizes(
   }
 
   {
-    MutexLock l(&mutex_);
+    //MutexLock l(&mutex_);
+    xsync::XScope<pthread_mutex_t> scope(mutex_.getNative());
     v->Unref();
   }
 }
 
 void DBImpl::SuspendCompactions() {
-  MutexLock l(& suspend_mutex);
+  //MutexLock l(&suspend_mutex);
+  xsync::XScope<pthread_mutex_t> scope(suspend_mutex.getNative());
   env_->Schedule(&SuspendWork, this);
   suspend_count++;
   while( !suspended ) {
-    suspend_cv.Wait();
+    //suspend_cv.Wait();
+      suspend_xcv.wait(scope);
   }
 }
 void DBImpl::SuspendWork(void* db) {
   reinterpret_cast<DBImpl*>(db)->SuspendCallback();
 }
 void DBImpl::SuspendCallback() {
-    MutexLock l(&suspend_mutex);
+    //MutexLock l(&suspend_mutex);
+    xsync::XScope<pthread_mutex_t> scope(suspend_mutex.getNative());
     Log(options_.info_log, "Compactions suspended");
     suspended = true;
-    suspend_cv.SignalAll();
+    //suspend_cv.SignalAll();
+    suspend_xcv.broadcast(scope);
     while( suspend_count > 0 ) {
-        suspend_cv.Wait();
+      //suspend_cv.Wait();
+      suspend_xcv.wait(scope);
     }
     suspended = false;
-    suspend_cv.SignalAll();
+    //suspend_cv.SignalAll();
+    suspend_xcv.broadcast(scope);
     Log(options_.info_log, "Compactions resumed");
 }
 void DBImpl::ResumeCompactions() {
-    MutexLock l(&suspend_mutex);
+    //MutexLock l(&suspend_mutex);
+    xsync::XScope<pthread_mutex_t> scope(suspend_mutex.getNative());
     suspend_count--;
-    suspend_cv.SignalAll();
+    //suspend_cv.SignalAll();
+    suspend_xcv.broadcast(scope);
     while( suspended ) {
-      suspend_cv.Wait();
+      //suspend_cv.Wait();
+      suspend_xcv.wait(scope);
     }
 }
 
@@ -1476,27 +1530,31 @@ Status DB::Open(const Options& options, const std::string& dbname,
   *dbptr = NULL;
 
   DBImpl* impl = new DBImpl(options, dbname);
-  impl->mutex_.Lock();
-  VersionEdit edit;
-  Status s = impl->Recover(&edit); // Handles create_if_missing, error_if_exists
-  if (s.ok()) {
-    uint64_t new_log_number = impl->versions_->NewFileNumber();
-    WritableFile* lfile;
-    s = options.env->NewWritableFile(LogFileName(dbname, new_log_number),
-                                     &lfile);
+  Status s;
+  {
+    xsync::XScope<pthread_mutex_t> scope(impl->mutex_.getNative());
+    //impl->mutex_.Lock();
+    VersionEdit edit;
+    s = impl->Recover(&edit, scope); // Handles create_if_missing, error_if_exists
     if (s.ok()) {
-      edit.SetLogNumber(new_log_number);
-      impl->logfile_ = lfile;
-      impl->logfile_number_ = new_log_number;
-      impl->log_ = new log::Writer(lfile);
-      s = impl->versions_->LogAndApply(&edit, &impl->mutex_);
+      uint64_t new_log_number = impl->versions_->NewFileNumber();
+      WritableFile* lfile;
+      s = options.env->NewWritableFile(LogFileName(dbname, new_log_number),
+                                       &lfile);
+      if (s.ok()) {
+        edit.SetLogNumber(new_log_number);
+        impl->logfile_ = lfile;
+        impl->logfile_number_ = new_log_number;
+        impl->log_ = new log::Writer(lfile);
+        s = impl->versions_->LogAndApply(&edit, &impl->mutex_);
+      }
+      if (s.ok()) {
+        impl->DeleteObsoleteFiles();
+        impl->MaybeScheduleCompaction(scope);
+      }
     }
-    if (s.ok()) {
-      impl->DeleteObsoleteFiles();
-      impl->MaybeScheduleCompaction();
-    }
+  //impl->mutex_.Unlock();
   }
-  impl->mutex_.Unlock();
   if (s.ok()) {
     *dbptr = impl;
   } else {
