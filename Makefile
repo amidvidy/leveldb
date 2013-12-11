@@ -6,8 +6,8 @@
 # Uncomment exactly one of the lines labelled (A), (B), and (C) below
 # to switch between compilation modes.
 
- OPT ?= -O2 -DNDEBUG -std=c++11      # (A) Production use (optimized mode)
-#  OPT ?= -g2 -std=c++11             # (B) Debug mode, w/ full line-level debugging symbols
+# OPT ?= -O2 -DNDEBUG -std=c++11      # (A) Production use (optimized mode)
+  OPT ?= -g2 -std=c++11             # (B) Debug mode, w/ full line-level debugging symbols
 # OPT ?= -O2 -g2 -DNDEBUG  -std=c++11# (C) Profiling mode: opt, but w/debugging symbols
 #-----------------------------------------------
 
@@ -105,7 +105,7 @@ $(LIBRARY): $(LIBOBJECTS)
 	$(AR) -rs $@ $(LIBOBJECTS)
 
 db_bench: db/db_bench.o $(LIBOBJECTS) $(TESTUTIL)
-	$(CXX) $(LDFLAGS) db/db_bench.o $(LIBOBJECTS) $(TESTUTIL) -o $@ $(LIBS)
+	$(CXX) -g2 $(LDFLAGS) db/db_bench.o $(LIBOBJECTS) $(TESTUTIL) -o $@ $(LIBS) # fixmelater
 
 db_bench_sqlite3: doc/bench/db_bench_sqlite3.o $(LIBOBJECTS) $(TESTUTIL)
 	$(CXX) $(LDFLAGS) doc/bench/db_bench_sqlite3.o $(LIBOBJECTS) $(TESTUTIL) -o $@ -lsqlite3 $(LIBS)
