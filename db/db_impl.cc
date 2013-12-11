@@ -1078,7 +1078,8 @@ Status DBImpl::Get(const ReadOptions& options,
                    const Slice& key,
                    std::string* value) {
   Status s;
-  MutexLock l(&mutex_);
+  //MutexLock l(&mutex_);
+  xsync::XScope<pthread_mutex_t> scope(mutex_.getNative());
   SequenceNumber snapshot;
   if (options.snapshot != NULL) {
     snapshot = reinterpret_cast<const SnapshotImpl*>(options.snapshot)->number_;
@@ -1098,7 +1099,8 @@ Status DBImpl::Get(const ReadOptions& options,
 
   // Unlock while reading from files and memtables
   {
-    mutex_.Unlock();
+    //mutex_.Unlock();
+    scope.exit();
     // First look in the memtable, then in the immutable memtable (if any).
     LookupKey lkey(key, snapshot);
     if (mem->Get(lkey, value, &s)) {
@@ -1109,7 +1111,8 @@ Status DBImpl::Get(const ReadOptions& options,
       s = current->Get(options, lkey, value, &stats);
       have_stat_update = true;
     }
-    mutex_.Lock();
+    //mutex_.Lock();
+    scope.enter();
   }
 
   if (have_stat_update && current->UpdateStats(stats)) {
