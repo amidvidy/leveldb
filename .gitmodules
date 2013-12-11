@@ -1,0 +1,3 @@
+[submodule "ext/xsync"]
+	path = ext/xsync
+	url = https://github.com/amidvidy/xsync.git
