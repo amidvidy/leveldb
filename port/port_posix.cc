@@ -27,7 +27,7 @@ void Mutex::Lock() { PthreadCall("lock", pthread_mutex_lock(&mu_)); }
 
 void Mutex::Unlock() { PthreadCall("unlock", pthread_mutex_unlock(&mu_)); }
 
-pthread_mutex_t Mutex::getNative() { return mu_; }
+pthread_mutex_t& Mutex::getNative() { return mu_; }
 
 CondVar::CondVar(Mutex* mu)
     : mu_(mu) {
