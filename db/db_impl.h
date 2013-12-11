@@ -15,6 +15,10 @@
 #include "port/port.h"
 #include "port/thread_annotations.h"
 
+// xsync
+#include "../ext/xsync/include/condition_variable.hpp"
+#include "../ext/xsync/include/scope.hpp"
+
 namespace leveldb {
 
 class MemTable;

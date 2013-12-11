@@ -43,9 +43,11 @@ struct DBImpl::Writer {
   WriteBatch* batch;
   bool sync;
   bool done;
-  port::CondVar cv;
+  xsync::XCondVar<pthread_mutex_t> xcv;
+  //port::CondVar cv;
 
-  explicit Writer(port::Mutex* mu) : cv(mu) { }
+  //explicit Writer(port::Mutex* mu) : cv(mu) { }
+  explicit Writer(port::Mutex* mu) { }
 };
 
 struct DBImpl::CompactionState {
@@ -1163,10 +1165,12 @@ Status DBImpl::Write(const WriteOptions& options, WriteBatch* my_batch) {
   w.sync = options.sync;
   w.done = false;
 
-  MutexLock l(&mutex_);
+  //MutexLock l(&mutex_);
+  xsync::XScope<pthread_mutex_t> scope(mutex_.getNative());
   writers_.push_back(&w);
   while (!w.done && &w != writers_.front()) {
-    w.cv.Wait();
+      w.xcv.wait(scope);
+      //w.cv.Wait();
   }
   if (w.done) {
     return w.status;
@@ -1186,7 +1190,8 @@ Status DBImpl::Write(const WriteOptions& options, WriteBatch* my_batch) {
     // and protects against concurrent loggers and concurrent writes
     // into mem_.
     {
-      mutex_.Unlock();
+      //mutex_.Unlock();
+      scope.exit();
       status = log_->AddRecord(WriteBatchInternal::Contents(updates));
       if (status.ok() && options.sync) {
         status = logfile_->Sync();
@@ -1194,7 +1199,8 @@ Status DBImpl::Write(const WriteOptions& options, WriteBatch* my_batch) {
       if (status.ok()) {
         status = WriteBatchInternal::InsertInto(updates, mem_);
       }
-      mutex_.Lock();
+      //mutex_.Lock();
+      scope.enter();
     }
     if (updates == tmp_batch_) tmp_batch_->Clear();
 
@@ -1207,14 +1213,16 @@ Status DBImpl::Write(const WriteOptions& options, WriteBatch* my_batch) {
     if (ready != &w) {
       ready->status = status;
       ready->done = true;
-      ready->cv.Signal();
+      //ready->cv.Signal();
+      ready->xcv.signal(scope);
     }
     if (ready == last_writer) break;
   }
 
   // Notify new head of write queue
   if (!writers_.empty()) {
-    writers_.front()->cv.Signal();
+    //writers_.front()->cv.Signal();
+    writers_.front()->xcv.signal(scope);
   }
 
   return status;
@@ -1420,7 +1428,7 @@ void DBImpl::SuspendCompactions() {
   suspend_count++;
   while( !suspended ) {
     suspend_cv.Wait();
-  }  
+  }
 }
 void DBImpl::SuspendWork(void* db) {
   reinterpret_cast<DBImpl*>(db)->SuspendCallback();
@@ -1443,7 +1451,7 @@ void DBImpl::ResumeCompactions() {
     suspend_cv.SignalAll();
     while( suspended ) {
       suspend_cv.Wait();
-    }  
+    }
 }
 
 

@@ -6,9 +6,9 @@
 # Uncomment exactly one of the lines labelled (A), (B), and (C) below
 # to switch between compilation modes.
 
-# OPT ?= -O2 -DNDEBUG       # (A) Production use (optimized mode)
-  OPT ?= -g2 -std=c++11             # (B) Debug mode, w/ full line-level debugging symbols
-# OPT ?= -O2 -g2 -DNDEBUG # (C) Profiling mode: opt, but w/debugging symbols
+ OPT ?= -O2 -DNDEBUG -std=c++11      # (A) Production use (optimized mode)
+#  OPT ?= -g2 -std=c++11             # (B) Debug mode, w/ full line-level debugging symbols
+# OPT ?= -O2 -g2 -DNDEBUG  -std=c++11# (C) Profiling mode: opt, but w/debugging symbols
 #-----------------------------------------------
 
 # detect what platform we're building on
@@ -24,6 +24,7 @@ LDFLAGS += $(PLATFORM_LDFLAGS)
 LIBS += $(PLATFORM_LIBS)
 
 LIBOBJECTS = $(SOURCES:.cc=.o)
+LIBOBJECTS += futex.o
 MEMENVOBJECTS = $(MEMENV_SOURCES:.cc=.o)
 
 TESTUTIL = ./util/testutil.o
@@ -82,7 +83,10 @@ $(SHARED2): $(SHARED3)
 	ln -fs $(SHARED3) $(SHARED2)
 endif
 
-$(SHARED3):
+futex.o: ext/xsync/src/futex.cpp ext/xsync/include/futex.hpp
+	$(CXX) $(CXXFLAGS) -c ext/xsync/src/futex.cpp
+
+$(SHARED3): futex.o
 	$(CXX) $(LDFLAGS) $(PLATFORM_SHARED_LDFLAGS)$(SHARED2) $(CXXFLAGS) $(PLATFORM_SHARED_CFLAGS) $(SOURCES) -o $(SHARED3) $(LIBS)
 
 endif  # PLATFORM_SHARED_EXT
@@ -136,7 +140,7 @@ corruption_test: db/corruption_test.o $(LIBOBJECTS) $(TESTHARNESS)
 crc32c_test: util/crc32c_test.o $(LIBOBJECTS) $(TESTHARNESS)
 	$(CXX) $(LDFLAGS) util/crc32c_test.o $(LIBOBJECTS) $(TESTHARNESS) -o $@ $(LIBS)
 
-db_test: db/db_test.o $(LIBOBJECTS) $(TESTHARNESS)
+db_test: db/db_test.o $(LIBOBJECTS) $(TESTHARNESS) futex.o
 	$(CXX) $(LDFLAGS) db/db_test.o $(LIBOBJECTS) $(TESTHARNESS) -o $@ $(LIBS)
 
 dbformat_test: db/dbformat_test.o $(LIBOBJECTS) $(TESTHARNESS)
